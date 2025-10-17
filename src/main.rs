@@ -1,59 +1,41 @@
 #![no_std]
 #![no_main]
 
-use esp_backtrace as _;
-use embedded_graphics::{
-    mono_font::{
-        ascii::FONT_8X13,
-        MonoTextStyle,
-        MonoFont,
+use {
+    display_interface_spi::{SPIInterface, *},
+    embedded_graphics::{
+        mono_font::{ascii::FONT_8X13, MonoFont, MonoTextStyle},
+        pixelcolor::Rgb565,
+        prelude::*,
+        primitives::{Line, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, Triangle},
+        text::{Alignment, Text},
     },
-    pixelcolor::Rgb565,
-    prelude::*,
-    primitives::{
-        Line,
-        PrimitiveStyle,
-        PrimitiveStyleBuilder,
-        Rectangle,
-        Triangle,
+    embedded_hal_bus::spi::{ExclusiveDevice, NoDelay},
+    esp_backtrace as _,
+    esp_hal::{
+        clock::CpuClock,
+        delay::Delay,
+        gpio::{AnyPin, Input, InputPin, Level, Output, OutputConfig, OutputPin},
+        init, main,
+        peripherals::{Peripherals, ADC1, SPI2},
+        rng::Rng,
+        spi::{
+            master::{Config, Spi},
+            Mode,
+        },
+        time::Rate,
+        timer::timg::TimerGroup,
+        Blocking,
     },
-    text::{
-        Alignment,
-        Text,
-    },
+    esp_println::println,
+    ili9341::{DisplaySize240x320, Ili9341, Orientation},
 };
-use display_interface_spi::{SPIInterface, *};
-use embedded_hal_bus::spi::{ExclusiveDevice, NoDelay};
-use esp_hal::{
-    rng::Rng,
-    timer::timg::TimerGroup,
-    delay::Delay,
-    gpio::{
-        OutputPin, InputPin,
-        AnyPin, Level, Input, Output, OutputConfig},
-    peripherals::{ADC1, Peripherals, SPI2},
-    spi::{
-        master::{Config, Spi},
-        Mode,
-    },
-    clock::CpuClock,
-    time::Rate,
-    Blocking,
-    main,
-    init,
-};
-use ili9341::{
-    DisplaySize240x320,
-    Ili9341,
-    Orientation,
-};
-use esp_println::println;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
 type TFTSpiDevice<'spi> = ExclusiveDevice<Spi<'spi, Blocking>, Output<'spi>, NoDelay>;
 type TFTSpiInterface<'spi> =
-SPIInterface<ExclusiveDevice<Spi<'spi, Blocking>, Output<'spi>, NoDelay>, Output<'spi>>;
+    SPIInterface<ExclusiveDevice<Spi<'spi, Blocking>, Output<'spi>, NoDelay>, Output<'spi>>;
 
 type Ili<'spi> = Ili9341<TFTSpiInterface<'spi>, Output<'spi>>;
 
@@ -61,23 +43,32 @@ pub struct TFT<'spi> {
     display: Ili<'spi>,
 }
 
-impl <'spi>TFT<'spi> {
-    fn draw_target(&mut self) -> DrawFlipper<'_,'spi> {
-        DrawFlipper { display: &mut self.display }
+impl<'spi> TFT<'spi> {
+    fn draw_target(&mut self) -> DrawFlipper<'_, 'spi> {
+        DrawFlipper {
+            display: &mut self.display,
+        }
     }
 }
 
-struct DrawFlipper<'a,'spi> { display: &'a mut Ili<'spi>, }
+struct DrawFlipper<'a, 'spi> {
+    display: &'a mut Ili<'spi>,
+}
 impl<'a, 'spi> DrawTarget for DrawFlipper<'a, 'spi> {
     type Error = <Ili<'spi> as DrawTarget>::Error;
     type Color = <Ili<'spi> as DrawTarget>::Color;
     fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
-       where I: IntoIterator<Item = Pixel<Self::Color>> {
+    where
+        I: IntoIterator<Item = Pixel<Self::Color>>,
+    {
         let width = self.bounding_box().size.width as i32;
-        self.display.draw_iter(pixels.into_iter().map(|mut p| { p.0.x = width - p.0.x; p }))
+        self.display.draw_iter(pixels.into_iter().map(|mut p| {
+            p.0.x = width - p.0.x;
+            p
+        }))
     }
 }
-impl<'a> Dimensions for DrawFlipper<'a,'_> {
+impl<'a> Dimensions for DrawFlipper<'a, '_> {
     fn bounding_box(&self) -> Rectangle {
         self.display.bounding_box()
     }
@@ -110,7 +101,8 @@ impl<'spi> TFT<'spi> {
             &mut Delay::new(),
             Orientation::Landscape,
             DisplaySize240x320,
-        ).unwrap();
+        )
+        .unwrap();
 
         TFT { display }
     }
