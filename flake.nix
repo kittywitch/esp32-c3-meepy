@@ -23,7 +23,7 @@
               pkgs.espflash
               pkgs.pkg-config 
               pkgs.stdenv.cc 
-          #pkgs.rust-analyzer
+              #pkgs.rust-analyzer
               #pkgs.bacon 
               #pkgs.systemdMinimal
               #pkgs.lunarvim 

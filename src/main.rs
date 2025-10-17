@@ -152,8 +152,8 @@ impl<'spi> TFT<'spi> {
             .with_mode(Mode::_0)
     }
 
-    pub fn clear(&mut self, color: Rgb565) {
-        self.display.clear(color).unwrap();
+    pub fn clear(&mut self, color: Bgr565) {
+        self.display.clear(candyflip(color)).unwrap();
     }
 
     pub fn part_clear(&mut self, x: i32, y: i32, w: u32, h: u32) {
@@ -161,6 +161,18 @@ impl<'spi> TFT<'spi> {
             .into_styled(PrimitiveStyle::with_fill(Bgr565::BLACK))
             .draw(&mut self.draw_target())
             .unwrap();
+    }
+
+    pub fn containing_recty(&mut self, x: i32, y: i32, w: u32, h: u32) {
+        Rectangle::new(Point::new(x, y), Size::new(w, h))
+            .into_styled(PrimitiveStyle::with_stroke(Bgr565::CYAN, 1))
+            .draw(&mut self.draw_target())
+            .unwrap();
+    }
+
+    pub fn container(&mut self, margin: i32, y: i32, h: u32) {
+        let width = self.display.bounding_box().size.width;
+        self.containing_recty(margin, y, width - margin as u32, h);
     }
 
     pub fn println(&mut self, text: &str, x: i32, y: i32) {
@@ -186,6 +198,7 @@ fn main() -> ! {
 
     let mut tft = TFT::new(peripherals.SPI2, sclk, miso, mosi, cs, rst, dc);
     tft.draw_target().clear(Bgr565::BLACK);
+    tft.container(2, 2, 16);
     tft.println("nya~! -w-", 100, 40);
 
     loop {
