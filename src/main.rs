@@ -51,9 +51,11 @@ impl<'spi> TFT<'spi> {
     }
 }
 
+
 struct DrawFlipper<'a, 'spi> {
     display: &'a mut Ili<'spi>,
 }
+
 impl<'a, 'spi> DrawTarget for DrawFlipper<'a, 'spi> {
     type Error = <Ili<'spi> as DrawTarget>::Error;
     type Color = <Ili<'spi> as DrawTarget>::Color;
@@ -68,11 +70,14 @@ impl<'a, 'spi> DrawTarget for DrawFlipper<'a, 'spi> {
         }))
     }
 }
+
 impl<'a> Dimensions for DrawFlipper<'a, '_> {
     fn bounding_box(&self) -> Rectangle {
         self.display.bounding_box()
     }
 }
+
+
 impl<'spi> TFT<'spi> {
     pub fn new(
         spi2: SPI2<'spi>,
