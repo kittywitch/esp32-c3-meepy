@@ -9,6 +9,7 @@
   outputs = { nixpkgs, flake-utils, esp-rs-nix, ... }@inputs: let
     mkPkgs = system: (import nixpkgs) {
       inherit system;
+      rust.rustcTarget = "riscv32imc-unknown-none-elf";
     };
     eachSystemOutputs = flake-utils.lib.eachDefaultSystem (system: let
       pkgs = mkPkgs system;
@@ -20,9 +21,9 @@
               esp-rs 
               pkgs.rustup 
               pkgs.espflash
-              #pkgs.rust-analyzer
               pkgs.pkg-config 
               pkgs.stdenv.cc 
+          #pkgs.rust-analyzer
               #pkgs.bacon 
               #pkgs.systemdMinimal
               #pkgs.lunarvim 

@@ -55,10 +55,33 @@ type TFTSpiDevice<'spi> = ExclusiveDevice<Spi<'spi, Blocking>, Output<'spi>, NoD
 type TFTSpiInterface<'spi> =
 SPIInterface<ExclusiveDevice<Spi<'spi, Blocking>, Output<'spi>, NoDelay>, Output<'spi>>;
 
+type Ili<'spi> = Ili9341<TFTSpiInterface<'spi>, Output<'spi>>;
+
 pub struct TFT<'spi> {
-    display: Ili9341<TFTSpiInterface<'spi>, Output<'spi>>,
+    display: Ili<'spi>,
 }
 
+impl <'spi>TFT<'spi> {
+    fn draw_target(&mut self) -> DrawFlipper<'_,'spi> {
+        DrawFlipper { display: &mut self.display }
+    }
+}
+
+struct DrawFlipper<'a,'spi> { display: &'a mut Ili<'spi>, }
+impl<'a, 'spi> DrawTarget for DrawFlipper<'a, 'spi> {
+    type Error = <Ili<'spi> as DrawTarget>::Error;
+    type Color = <Ili<'spi> as DrawTarget>::Color;
+    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
+       where I: IntoIterator<Item = Pixel<Self::Color>> {
+        let width = self.bounding_box().size.width as i32;
+        self.display.draw_iter(pixels.into_iter().map(|mut p| { p.0.x = width - p.0.x; p }))
+    }
+}
+impl<'a> Dimensions for DrawFlipper<'a,'_> {
+    fn bounding_box(&self) -> Rectangle {
+        self.display.bounding_box()
+    }
+}
 impl<'spi> TFT<'spi> {
     pub fn new(
         spi2: SPI2<'spi>,
@@ -105,14 +128,14 @@ impl<'spi> TFT<'spi> {
     pub fn part_clear(&mut self, x: i32, y: i32, w: u32, h: u32) {
         Rectangle::new(Point::new(x, y), Size::new(w, h))
             .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
-            .draw(&mut self.display)
+            .draw(&mut self.draw_target())
             .unwrap();
     }
 
     pub fn println(&mut self, text: &str, x: i32, y: i32) {
         let style = MonoTextStyle::new(&FONT_8X13, Rgb565::RED);
         Text::with_alignment(text, Point::new(x, y), style, Alignment::Center)
-            .draw(&mut self.display)
+            .draw(&mut self.draw_target())
             .unwrap();
     }
 }
