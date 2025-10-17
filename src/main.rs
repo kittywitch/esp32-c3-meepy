@@ -5,7 +5,7 @@ use {
     display_interface_spi::{SPIInterface, *},
     embedded_graphics::{
         mono_font::{ascii::FONT_8X13, MonoFont, MonoTextStyle},
-        pixelcolor::Rgb565,
+        pixelcolor::{Rgb565, Bgr565, RgbColor},
         prelude::*,
         primitives::{Line, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, Triangle},
         text::{Alignment, Text},
@@ -51,6 +51,16 @@ impl<'spi> TFT<'spi> {
     }
 }
 
+fn candyflip(color: Bgr565) -> Rgb565 {
+    unsafe {
+        core::mem::transmute::<Bgr565, Rgb565>(color)
+    }
+}
+fn flipcandy(color: Rgb565) -> Bgr565 {
+    unsafe {
+        core::mem::transmute::<Rgb565, Bgr565>(color)
+    }
+}
 
 struct DrawFlipper<'a, 'spi> {
     display: &'a mut Ili<'spi>,
@@ -58,16 +68,40 @@ struct DrawFlipper<'a, 'spi> {
 
 impl<'a, 'spi> DrawTarget for DrawFlipper<'a, 'spi> {
     type Error = <Ili<'spi> as DrawTarget>::Error;
-    type Color = <Ili<'spi> as DrawTarget>::Color;
+    type Color = Bgr565;//<Ili<'spi> as DrawTarget>::Color;
     fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
     where
         I: IntoIterator<Item = Pixel<Self::Color>>,
     {
         let width = self.bounding_box().size.width as i32;
-        self.display.draw_iter(pixels.into_iter().map(|mut p| {
-            p.0.x = width - p.0.x;
-            p
+        self.display.draw_iter(pixels.into_iter().map(|p| {
+            Pixel(
+                Point {
+                    x: width - p.0.x - 1,
+                    y: p.0.y,
+                },
+                candyflip(p.1),
+            )
         }))
+    }
+    fn fill_contiguous<I>(
+        &mut self,
+        area: &Rectangle,
+        colors: I,
+    ) -> Result<(), Self::Error>
+       where I: IntoIterator<Item = Self::Color> {
+        self.display.fill_contiguous(area, colors.into_iter().map(|c| candyflip(c)))
+    }
+    fn fill_solid(
+        &mut self,
+        area: &Rectangle,
+        color: Self::Color,
+    ) -> Result<(), Self::Error> {
+        self.display.fill_solid(area, candyflip(color))
+    }
+
+    fn clear(&mut self, color: Self::Color) -> Result<(), Self::Error> {
+        self.display.clear(candyflip(color))
     }
 }
 
@@ -124,13 +158,13 @@ impl<'spi> TFT<'spi> {
 
     pub fn part_clear(&mut self, x: i32, y: i32, w: u32, h: u32) {
         Rectangle::new(Point::new(x, y), Size::new(w, h))
-            .into_styled(PrimitiveStyle::with_fill(Rgb565::WHITE))
+            .into_styled(PrimitiveStyle::with_fill(Bgr565::BLACK))
             .draw(&mut self.draw_target())
             .unwrap();
     }
 
     pub fn println(&mut self, text: &str, x: i32, y: i32) {
-        let style = MonoTextStyle::new(&FONT_8X13, Rgb565::RED);
+        let style = MonoTextStyle::new(&FONT_8X13, Bgr565::WHITE);
         Text::with_alignment(text, Point::new(x, y), style, Alignment::Center)
             .draw(&mut self.draw_target())
             .unwrap();
@@ -151,7 +185,7 @@ fn main() -> ! {
     let rst = peripherals.GPIO0;
 
     let mut tft = TFT::new(peripherals.SPI2, sclk, miso, mosi, cs, rst, dc);
-    tft.clear(Rgb565::WHITE);
+    tft.draw_target().clear(Bgr565::BLACK);
     tft.println("nya~! -w-", 100, 40);
 
     loop {
