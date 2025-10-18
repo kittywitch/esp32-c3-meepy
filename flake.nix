@@ -7,35 +7,36 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
   };
   outputs = { nixpkgs, flake-utils, esp-rs-nix, ... }@inputs: let
+    arch = "riscv32imc-unknown-none-elf";
     mkPkgs = system: (import nixpkgs) {
       inherit system;
-      rust.rustcTarget = "riscv32imc-unknown-none-elf";
+      rust.rustcTarget = arch;
     };
     eachSystemOutputs = flake-utils.lib.eachDefaultSystem (system: let
       pkgs = mkPkgs system;
+      lib = pkgs.lib;
       inherit (esp-rs-nix.packages.${system}) esp-rs;
+      inherit (lib.meta) getExe;
+      buildy = pkgs.writeShellScriptBin "build" ''
+        set -euox pipefail
+        PACKAGE_NAME="$(${getExe pkgs.toml-cli} get -r Cargo.toml package.name)"
+        EXE="''${PROJECT_DIR}/target/${arch}/release/''${PACKAGE_NAME}"
+        cargo build --release &&
+        sudo espflash flash ''${EXE}
+      '';
       esp-shell = pkgs.mkShell rec {
           name = "esp-shell";
 
           buildInputs = [
-              esp-rs 
-              pkgs.rustup 
+              esp-rs
+              buildy
+              pkgs.rustup
               pkgs.espflash
-              pkgs.pkg-config 
-              pkgs.stdenv.cc 
-              #pkgs.rust-analyzer
-              #pkgs.bacon 
-              #pkgs.systemdMinimal
-              #pkgs.lunarvim 
-              #pkgs.inotify-tools
-              #pkgs.picocom
-              #pkgs.vscode-fhs
+              pkgs.pkg-config
+              pkgs.stdenv.cc
               pkgs.libusb1
               pkgs.python3
-              # Workspace command runners
-              pkgs.just
               pkgs.mprocs
-              # This is for parameterising the justfile
               pkgs.toml-cli
               pkgs.moreutils
               pkgs.gdb
@@ -44,6 +45,7 @@
           LD_LIBRARY_PATH = "${pkgs.lib.makeLibraryPath buildInputs}";
 
           shellHook = ''
+          export PROJECT_DIR="$(pwd)";
           # custom bashrc stuff
           export PS1_PREFIX="(esp-rs)"
           . ~/.bashrc
