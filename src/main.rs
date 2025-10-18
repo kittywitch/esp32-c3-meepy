@@ -4,52 +4,45 @@
 
 extern crate alloc;
 
+
+use alloc::format;
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, once_lock::OnceLock, rwlock::RwLock};
+use esp_alloc as _;
+use esp_backtrace as _;
+
 use {
-    core::ptr::addr_of_mut,
-    display_interface_spi::{SPIInterface, *},
-    embedded_graphics::{
-        mono_font::{ascii::{FONT_8X13, FONT_6X10}, MonoFont, MonoTextStyle},
-        pixelcolor::{Rgb565, Bgr565, RgbColor},
+    embassy_net::Runner,
+    embassy_time::{Duration, Timer},
+    display_interface_spi::SPIInterface, embassy_executor::Spawner, embedded_graphics::{
+        mono_font::{ascii::FONT_6X10, MonoTextStyle},
+        pixelcolor::{Bgr565, Rgb565, RgbColor},
         prelude::*,
-        primitives::{Styled, Line, PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, Triangle},
+        primitives::{PrimitiveStyle, PrimitiveStyleBuilder, Rectangle},
         text::{Alignment, Text},
-    },
-    embedded_text::{
-        TextBox,
-        style::{
-            TextBoxStyleBuilder,
-            HeightMode,
-        },
-        alignment::HorizontalAlignment as TextHorizontalAlignment,
-    },
-    embedded_layout::{
-        view_group::ViewGroup,
-        layout::{
-            linear::LinearLayout,
-        },
-        prelude::*,
-    },
-    embedded_hal_bus::spi::{ExclusiveDevice, NoDelay},
-    esp_backtrace as _,
-    esp_hal::{
-        clock::CpuClock,
-        delay::Delay,
-        gpio::{AnyPin, Input, InputPin, Level, Output, OutputConfig, OutputPin},
-        init, main,
-        peripherals::{Peripherals, ADC1, SPI2},
-        rng::Rng,
-        spi::{
+    }, embedded_hal_bus::spi::{ExclusiveDevice, NoDelay}, embedded_layout::{
+        layout::linear::LinearLayout, prelude::*, view_group::ViewGroup
+    }, esp_backtrace as _, esp_hal::{
+        ram,
+        clock::CpuClock, delay::Delay, gpio::{InputPin, Level, Output, OutputConfig, OutputPin}, init, peripherals::{Peripherals, SPI2, TIMG1}, rng::Rng, spi::{
             master::{Config, Spi},
             Mode,
-        },
-        time::Rate,
-        timer::timg::TimerGroup,
-        Blocking,
+        }, time::Rate, timer::timg::TimerGroup, Blocking
     },
-    esp_println::println,
     ili9341::{DisplaySize240x320, Ili9341, Orientation},
-    embassy_executor::Spawner,
-    embassy_time::{Duration, Timer},
+};
+
+#[cfg(feature = "log")]
+use {
+    esp_println::println
+};
+
+use embassy_net::{Stack, StackResources};
+#[cfg(target_arch = "riscv32")]
+use esp_hal::interrupt::software::SoftwareInterruptControl;
+use esp_radio::{
+    wifi::{
+        ClientConfig, Interfaces, ModeConfig, ScanConfig, WifiController, WifiDevice, WifiEvent, WifiStaState
+    }, Controller as RadioController
 };
 
 const SSID: &str = env!("WIFI_SSID");
@@ -118,7 +111,7 @@ impl<'a, 'spi> DrawTarget for DrawFlipper<'a, 'spi> {
         colors: I,
     ) -> Result<(), Self::Error>
        where I: IntoIterator<Item = Self::Color> {
-        self.display.fill_contiguous(area, colors.into_iter().map(|c| candyflip(c)))
+        self.display.fill_contiguous(area, colors.into_iter().map(candyflip))
     }
     fn fill_solid(
         &mut self,
@@ -195,7 +188,7 @@ impl<'spi> TFT<'spi> {
         let spi_device = ExclusiveDevice::new_no_delay(spi, cs_output).unwrap();
         let interface = SPIInterface::new(spi_device, dc_output);
 
-        let mut display = Ili9341::new(
+        let display = Ili9341::new(
             interface,
             rst_output,
             &mut Delay::new(),
@@ -250,13 +243,13 @@ impl<'spi> TFT<'spi> {
 
     pub fn fullscreen_alert(&mut self, text: &str, clear: bool) {
         if clear {
-            let _ = self.clear_root();
+            self.clear_root();
         }
         let display_area = self.display.bounding_box();
         LinearLayout::vertical(
             Chain::new(
                 LinearLayout::horizontal(
-                    Self::contained_text("Initialized controller!", 16)
+                    Self::contained_text(text, 16)
                 )
             )
         ).with_alignment(horizontal::Center)
@@ -321,48 +314,103 @@ async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
     runner.run().await
 }*/
 
-
 struct Controller<'tft> {
     pub display: TFT<'tft>,
+    pub wifi: ControllerWifi,
 }
 
-impl Controller<'_> {
-    async fn init(peripherals: Peripherals) -> Self {
-        let mut display = Self::init_screen(peripherals).await;
+impl <'tft>Controller<'tft> {
+    async fn init(spawner: Spawner, mut display: TFT<'tft>, stack: Stack<'static>) -> Self {
+        let wifi = ControllerWifi::init_wifi(spawner, &mut display, stack).await;
         let mut controller = Self {
             display,
+            wifi,
         };
-        controller.display.fullscreen_alert("Controller initialized!", true);
+        if let Some(config) = controller.wifi.stack.config_v4() {
+            controller.display.fullscreen_alert(&format!("Controller initialized!\nCurrent IP address: {}", config.address), true);
+        }
         controller
     }
-
-    async fn init_screen<'tft>(peripherals: Peripherals) -> TFT<'tft> {
-        // Refer to https://www.espboards.dev/esp32/esp32-c3-super-mini/#esp32-c3-super-mini-pinout
-        let rst = peripherals.GPIO0;
-        let sclk = peripherals.GPIO4;
-        let miso = peripherals.GPIO5;
-        let mosi = peripherals.GPIO6;
-        let cs = peripherals.GPIO7;
-        let dc = peripherals.GPIO9;
-
-        let mut tft = TFT::new(peripherals.SPI2, sclk, miso, mosi, cs, rst, dc);
-        tft
-    }
 }
 
-/*struct WifiController {
-    timer: TimerGroup,
+struct ControllerWifi {
+    stack: Stack<'static>,
 }
 
-impl WifiController {
-    async fn init_wifi(peripherals: Peripherals) -> Self {
-        let timer = TimerGroup::new(peripherals.TIMG1);
-        let rng = Rng::new();
+impl ControllerWifi {
+    async fn init_wifi(spawner: Spawner, display: &mut TFT<'_>, stack: Stack<'static>) -> Self {
+
+
+        let mut rx_buffer = [0; 4096];
+        let mut tx_buffer = [0; 4096];
+
+        println!("Waiting to get IP address...");
+        display.fullscreen_alert("Waiting to obtain an IP address", true);
+        loop {
+            if let Some(config) = stack.config_v4() {
+                println!("Got IP: {}", config.address);
+                display.fullscreen_alert(&format!("IP address obtained: {}", config.address), true);
+                break;
+            }
+            Timer::after(Duration::from_millis(500)).await;
+        }
+
         Self {
-            timer
+            stack
         }
     }
-}*/
+}
+
+#[embassy_executor::task]
+async fn connection(mut controller: WifiController<'static>) {
+    println!("start connection task");
+    println!("Device capabilities: {:?}", controller.capabilities());
+    loop {
+        match esp_radio::wifi::sta_state() {
+            WifiStaState::Connected => {
+                // wait until we're no longer connected
+                controller.wait_for_event(WifiEvent::StaDisconnected).await;
+                Timer::after(Duration::from_millis(5000)).await
+            }
+            _ => {}
+        }
+        if !matches!(controller.is_started(), Ok(true)) {
+            let client_config = ModeConfig::Client(
+                ClientConfig::default()
+                    .with_ssid(SSID.into())
+                    .with_password(PASSWORD.into()),
+            );
+            controller.set_config(&client_config).unwrap();
+            println!("Starting wifi");
+            controller.start_async().await.unwrap();
+            println!("Wifi started!");
+
+            println!("Scan");
+            let scan_config = ScanConfig::default().with_max(10);
+            let result = controller
+                .scan_with_config_async(scan_config)
+                .await
+                .unwrap();
+            for ap in result {
+                println!("{:?}", ap);
+            }
+        }
+        println!("About to connect...");
+
+        match controller.connect_async().await {
+            Ok(_) => println!("Wifi connected!"),
+            Err(e) => {
+                println!("Failed to connect to wifi: {e:?}");
+                Timer::after(Duration::from_millis(5000)).await
+            }
+        }
+    }
+}
+
+#[embassy_executor::task]
+async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
+    runner.run().await
+}
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {
@@ -370,32 +418,56 @@ async fn main(spawner: Spawner) {
     esp_alloc::heap_allocator!(size: 64*1024);
 
     #[cfg(feature = "log")]
-    {
         // The default log level can be specified here.
         // You can see the esp-println documentation： https://docs.rs/esp-println
-        esp_println::logger::init_logger(log::LevelFilter::Info);
-    }
+    esp_println::logger::init_logger(log::LevelFilter::Info);
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals: Peripherals = init(config);
-/*    let timer1 = TimerGroup::new(peripherals.TIMG1);
-    let rng = Rng::new();
-    let esp_wifi_ctrl = &*mk_static!(
-        EspWifiController<'static>,
-        init(timer1.timer0, rng).unwrap()
+
+    let spi2 = peripherals.SPI2;
+    let rst = peripherals.GPIO0;
+    let sclk = peripherals.GPIO4;
+    let miso = peripherals.GPIO5;
+    let mosi = peripherals.GPIO6;
+    let cs = peripherals.GPIO7;
+    let dc = peripherals.GPIO9;
+
+    let display = TFT::new(spi2, sclk, miso, mosi, cs, rst, dc);
+
+    let timg0 = TimerGroup::new(peripherals.TIMG0);
+    #[cfg(target_arch = "riscv32")]
+    let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+    esp_rtos::start(
+        timg0.timer0,
+        #[cfg(target_arch = "riscv32")]
+        sw_int.software_interrupt0,
     );
-    let (controller, interfaces) = esp_wifi::wifi::new(esp_wifi_ctrl, peripherals.WIFI).unwrap();
-    let wifi_interface = interfaces.sta;
-    let seed = rng.random();
-    let wifi_config = Config::dhcpv4(Default::default());
+
+    let esp_radio_ctrl = &*mk_static!(RadioController<'static>, esp_radio::init().unwrap());
+
+    let (wifi_controller, wifi_interfaces) =
+        esp_radio::wifi::new(&esp_radio_ctrl, peripherals.WIFI, Default::default()).unwrap();
+
+    let wifi_interface = wifi_interfaces.sta;
+
+    let config = embassy_net::Config::dhcpv4(Default::default());
+
+    let rng = Rng::new();
+    let seed = (rng.random() as u64) << 32 | rng.random() as u64;
+
+    // Init network stack
     let (stack, runner) = embassy_net::new(
         wifi_interface,
-        wifi_config,
-        mk_static!(StackResources<8>, StackResources::<8>::new()),
+        config,
+        mk_static!(StackResources<3>, StackResources::<3>::new()),
         seed,
-    );*/
+    );
 
-    let mut controller = Controller::init(peripherals).await;
+    spawner.spawn(connection(wifi_controller)).ok();
+    spawner.spawn(net_task(runner)).ok();
+
+    let controller = Controller::init(spawner, display, stack).await;
 
     loop {
         // your business logic

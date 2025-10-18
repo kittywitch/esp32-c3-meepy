@@ -5,6 +5,22 @@ authors = ["kittywitch"]
 edition = "2021"
 license = "MIT"
 
+[features]
+default = [
+  "log",
+  "esp32c3"
+]
+log = [
+  "dep:log"
+]
+esp32c3 = [
+    "esp-backtrace/esp32c3",
+    "esp-bootloader-esp-idf/esp32c3",
+    "esp-hal/esp32c3",
+    "esp-rtos/esp32c3",
+    "esp-radio/esp32c3",
+]
+
 [dependencies]
 display-interface-spi = "0.5.0"
 embassy-executor = "0.9.1"
@@ -24,9 +40,12 @@ esp-bootloader-esp-idf  = { version = "0.3.0", features = ["esp32c3"]}
 esp-hal = { version = "1.0.0-rc.1", features = ["esp32c3", "unstable"] }
 esp-println = { version = "0.16.0", features = ["esp32c3", "log-04"] }
 esp-radio = { version = "0.16.0", features = ["smoltcp", "wifi", "esp32c3", "unstable"] }
-esp-rtos = { version = "0.1.1", features = ["esp32c3", "embassy"] }
+esp-rtos = { version = "0.1.1", features = ["esp32c3", "embassy", "esp-radio"] }
 ili9341 = "0.6.0"
 static_cell = "2.1.1"
+
+log = { version = "0.4.28", optional = true }
+embassy-sync = "0.7.2"
 
 # https://docs.espressif.com/projects/rust/esp-wifi/0.15.0/esp32c3/esp_wifi/index.html#optimization-level
 [profile.dev.package.esp-wifi]
