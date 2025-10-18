@@ -32,6 +32,7 @@
               buildy
               pkgs.rustup
               pkgs.espflash
+              pkgs.clippy
               pkgs.pkg-config
               pkgs.stdenv.cc
               pkgs.libusb1
@@ -45,6 +46,7 @@
           LD_LIBRARY_PATH = "${pkgs.lib.makeLibraryPath buildInputs}";
 
           shellHook = ''
+          export PATH="${lib.makeBinPath [pkgs.rust-analyzer]}:$PATH"
           export PROJECT_DIR="$(pwd)";
           # custom bashrc stuff
           export PS1_PREFIX="(esp-rs)"

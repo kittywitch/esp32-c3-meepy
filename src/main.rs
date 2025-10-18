@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![feature(trait_alias)]
 
 extern crate alloc;
 
@@ -22,7 +23,10 @@ use {
         alignment::HorizontalAlignment as TextHorizontalAlignment,
     },
     embedded_layout::{
-        layout::linear::LinearLayout,
+        view_group::ViewGroup,
+        layout::{
+            linear::LinearLayout,
+        },
         prelude::*,
     },
     embedded_hal_bus::spi::{ExclusiveDevice, NoDelay},
@@ -53,34 +57,38 @@ const PASSWORD: &str = env!("WIFI_PASSWORD");
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
+/*
+* Make it easier to follow the TFT related types. .-.
+*/
+
 type TFTSpiDevice<'spi> = ExclusiveDevice<Spi<'spi, Blocking>, Output<'spi>, NoDelay>;
 type TFTSpiInterface<'spi> =
     SPIInterface<ExclusiveDevice<Spi<'spi, Blocking>, Output<'spi>, NoDelay>, Output<'spi>>;
 
 type Ili<'spi> = Ili9341<TFTSpiInterface<'spi>, Output<'spi>>;
 
-pub struct TFT<'spi> {
-    display: Ili<'spi>,
-}
+/*
+Provide an type alias DColour (display colour) since Bgr565 is the actual colour ordering for my display.
+*/
 
-impl<'spi> TFT<'spi> {
-    fn draw_target(&mut self) -> DrawFlipper<'_, 'spi> {
-        DrawFlipper {
-            display: &mut self.display,
-        }
-    }
-}
+type DColor = Bgr565;
 
-fn candyflip(color: Bgr565) -> Rgb565 {
-    unsafe {
-        core::mem::transmute::<Bgr565, Rgb565>(color)
-    }
-}
-fn flipcandy(color: Rgb565) -> Bgr565 {
-    unsafe {
-        core::mem::transmute::<Rgb565, Bgr565>(color)
-    }
-}
+/*
+* Provide an alias for something that can be put into a ViewGroup for the use of embedded-layout.
+*/
+
+trait Drawy = Drawable<Color = DColor> + ViewGroup;
+
+/*
+* So, my specific ILI9341-derived display doesn't JUST have wrong colour channels (Rgb vs Gbr like
+* in the actual driver implementation).
+*
+* It also is *mirrored* horizontally. The underlying library and the driver implementation both don't
+* expose anything reasonable to handle this.
+*
+* The driver exposes "Orientation" of Horizontal, Portrait, HorizontalFlipped and PortraitFlipped.
+* This is inadequate for the problems in the implementation I have.
+*/
 
 struct DrawFlipper<'a, 'spi> {
     display: &'a mut Ili<'spi>,
@@ -88,7 +96,7 @@ struct DrawFlipper<'a, 'spi> {
 
 impl<'a, 'spi> DrawTarget for DrawFlipper<'a, 'spi> {
     type Error = <Ili<'spi> as DrawTarget>::Error;
-    type Color = Bgr565;//<Ili<'spi> as DrawTarget>::Color;
+    type Color = DColor;//<Ili<'spi> as DrawTarget>::Color;
     fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
     where
         I: IntoIterator<Item = Pixel<Self::Color>>,
@@ -131,20 +139,40 @@ impl<'a> Dimensions for DrawFlipper<'a, '_> {
     }
 }
 
-#[derive(Clone,Copy)]
-enum StyleVariant {
-    Header,
-    Regular
+/*
+* Container for implementing the TFT type
+*/
+
+pub struct TFT<'spi> {
+    display: Ili<'spi>,
 }
 
 impl<'spi> TFT<'spi> {
-    const H_BG: Bgr565 = Bgr565::CSS_DARK_SLATE_GRAY;
-    const H_S: Bgr565 = Bgr565::CYAN;
-    const H_FG: Bgr565 = Bgr565::WHITE;
+    fn draw_target(&mut self) -> DrawFlipper<'_, 'spi> {
+        DrawFlipper {
+            display: &mut self.display,
+        }
+    }
+}
 
-    const R_BG: Bgr565 = Bgr565::CSS_DARK_SLATE_GRAY;
-    const R_S: Bgr565 = Bgr565::BLUE;
-    const R_FG: Bgr565 = Bgr565::WHITE;
+/*
+* Provide a decent-ish way of replacing the colour channel ordering.
+*
+* Ask not questions about the drug terminology!
+*/
+
+fn candyflip(color: DColor) -> Rgb565 {
+    unsafe {
+        core::mem::transmute::<DColor, Rgb565>(color)
+    }
+}
+
+/*
+* Implement rendering helpers for the weird display
+*/
+
+impl<'spi> TFT<'spi> {
+    const ROOT_BG: DColor = DColor::BLACK;
 
     pub fn new(
         spi2: SPI2<'spi>,
@@ -185,43 +213,61 @@ impl<'spi> TFT<'spi> {
             .with_mode(Mode::_0)
     }
 
-    pub fn clear(&mut self, color: Bgr565) {
-        self.display.clear(candyflip(color)).unwrap();
+    pub fn clear(&mut self, color: DColor) {
+        let _ = self.display.clear(candyflip(color));
+    }
+
+    pub fn clear_root(&mut self) {
+        let _ = self.display.clear(candyflip(Self::ROOT_BG));
     }
 
     pub fn part_clear(&mut self, x: i32, y: i32, w: u32, h: u32) {
         Rectangle::new(Point::new(x, y), Size::new(w, h))
-            .into_styled(PrimitiveStyle::with_fill(Bgr565::BLACK))
+            .into_styled(PrimitiveStyle::with_fill(DColor::BLACK))
             .draw(&mut self.draw_target())
             .unwrap();
     }
 
-    pub fn containing_recty(&mut self, x: i32, y: i32, w: u32, h: u32, style: StyleVariant) -> Styled<Rectangle, PrimitiveStyle<Bgr565>> {
-        let bg = match style {
-            StyleVariant::Header => Self::H_BG,
-            StyleVariant::Regular => Self::R_BG,
-        };
-        let s = match style {
-            StyleVariant::Header => Self::H_S,
-            StyleVariant::Regular => Self::R_S,
-        };
+    pub fn contained_text<'a>(text: &'a str, margin: u32)  -> impl Drawy + 'a {
         let style = PrimitiveStyleBuilder::new()
-            .fill_color(bg)
-            .stroke_color(s)
-            .stroke_width(1)
+            .stroke_color(DColor::RED)
+            .stroke_width(3)
+            .fill_color(DColor::CSS_DARK_SLATE_GRAY)
             .build();
-        Rectangle::new(Point::new(x, y), Size::new(w, h))
-            .clone()
+        let text_style = MonoTextStyle::new(&FONT_6X10, DColor::WHITE);
+        let text = Text::new(text, Point::new_equal((margin/2) as i32), text_style);
+        let margin_size = Size::new_equal(margin);
+        let bound = text.bounding_box();
+        let size = bound.size + margin_size;
+        let height_offset = Point::new(0, -((margin/2) as i32));
+        Chain::new(
+            text
+        ).append(
+            Rectangle::new(height_offset, size)
             .into_styled(style)
+        )
     }
 
-    pub fn container(&mut self, margin: i32, y: i32, h: u32, style: StyleVariant) -> Styled<Rectangle, PrimitiveStyle<Bgr565>> {
-        let width = self.display.bounding_box().size.width;
-        self.containing_recty(margin, y, width - margin as u32, h, style)
+    pub fn fullscreen_alert(&mut self, text: &str, clear: bool) {
+        if clear {
+            let _ = self.clear_root();
+        }
+        let display_area = self.display.bounding_box();
+        LinearLayout::vertical(
+            Chain::new(
+                LinearLayout::horizontal(
+                    Self::contained_text("Initialized controller!", 16)
+                )
+            )
+        ).with_alignment(horizontal::Center)
+        .arrange()
+        .align_to(&display_area, horizontal::Center, vertical::Center)
+        .draw(&mut self.draw_target())
+        .unwrap();
     }
 
     pub fn println(&mut self, text: &str, x: i32, y: i32) {
-        let style = MonoTextStyle::new(&FONT_6X10, Bgr565::WHITE);
+        let style = MonoTextStyle::new(&FONT_6X10, DColor::WHITE);
         Text::with_alignment(text, Point::new(x, y), style, Alignment::Center)
             .draw(&mut self.draw_target())
             .unwrap();
@@ -276,49 +322,53 @@ async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
 }*/
 
 
-fn init_heap() {
-    const HEAP_SIZE: usize = 64 * 1024;
-    static mut HEAP: core::mem::MaybeUninit<[u8; HEAP_SIZE]> = core::mem::MaybeUninit::uninit();
-
-    unsafe {
-        esp_alloc::HEAP.add_region(esp_alloc::HeapRegion::new(
-            addr_of_mut!(HEAP) as *mut u8,
-            HEAP_SIZE,
-            esp_alloc::MemoryCapability::Internal.into(),
-        ));
-    }
-}
-
 struct Controller<'tft> {
-    pub tft: TFT<'tft>,
+    pub display: TFT<'tft>,
 }
 
 impl Controller<'_> {
     async fn init(peripherals: Peripherals) -> Self {
-        let tft = Self::init_screen(peripherals).await;
-        let controller = Self {
-            tft,
+        let mut display = Self::init_screen(peripherals).await;
+        let mut controller = Self {
+            display,
         };
+        controller.display.fullscreen_alert("Controller initialized!", true);
         controller
     }
 
     async fn init_screen<'tft>(peripherals: Peripherals) -> TFT<'tft> {
-        let dc = peripherals.GPIO9;
-        let mosi = peripherals.GPIO6;
+        // Refer to https://www.espboards.dev/esp32/esp32-c3-super-mini/#esp32-c3-super-mini-pinout
+        let rst = peripherals.GPIO0;
         let sclk = peripherals.GPIO4;
         let miso = peripherals.GPIO5;
+        let mosi = peripherals.GPIO6;
         let cs = peripherals.GPIO7;
-        let rst = peripherals.GPIO0;
+        let dc = peripherals.GPIO9;
 
         let mut tft = TFT::new(peripherals.SPI2, sclk, miso, mosi, cs, rst, dc);
-        let _ = tft.draw_target().clear(Bgr565::BLACK);
         tft
     }
 }
 
+/*struct WifiController {
+    timer: TimerGroup,
+}
+
+impl WifiController {
+    async fn init_wifi(peripherals: Peripherals) -> Self {
+        let timer = TimerGroup::new(peripherals.TIMG1);
+        let rng = Rng::new();
+        Self {
+            timer
+        }
+    }
+}*/
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {
-    init_heap();
+    // Note that for alloc to work, `./.cargo/config.toml` should contain alloc under build-std.
+    esp_alloc::heap_allocator!(size: 64*1024);
+
     #[cfg(feature = "log")]
     {
         // The default log level can be specified here.
@@ -346,28 +396,6 @@ async fn main(spawner: Spawner) {
     );*/
 
     let mut controller = Controller::init(peripherals).await;
-
-    let display_area = controller.tft.display.bounding_box();
-    let text_style = MonoTextStyle::new(&FONT_6X10, Bgr565::WHITE);
-    let margin = 2;
-    let display_width = display_area.size.width;
-    let display_height = display_area.size.height;
-
-    LinearLayout::vertical(
-        Chain::new(
-            LinearLayout::horizontal(
-                Chain::new(
-                    Text::new("Initializing~!", Point::new(margin, margin), text_style)
-                ).append(
-                    controller.tft.container(margin, -10, 20, StyleVariant::Header)
-                )
-            )
-        )
-    ).with_alignment(horizontal::Center)
-    .arrange()
-    .align_to(&display_area, horizontal::Center, vertical::Center)
-    .draw(&mut controller.tft.draw_target())
-    .unwrap();
 
     loop {
         // your business logic

@@ -27,3 +27,7 @@ esp-radio = { version = "0.16.0", features = ["smoltcp", "wifi", "esp32c3", "uns
 esp-rtos = { version = "0.1.1", features = ["esp32c3", "embassy"] }
 ili9341 = "0.6.0"
 static_cell = "2.1.1"
+
+# https://docs.espressif.com/projects/rust/esp-wifi/0.15.0/esp32c3/esp_wifi/index.html#optimization-level
+[profile.dev.package.esp-wifi]
+opt-level = 3
