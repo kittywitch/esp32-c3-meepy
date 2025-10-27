@@ -1,0 +1,185 @@
+// Copyright Claudio Mattera 2024-2025.
+//
+// Distributed under the MIT License or the Apache 2.0 License at your option.
+// See the accompanying files LICENSE-MIT.txt and LICENSE-APACHE-2.0.txt, or
+// online at
+// https://opensource.org/licenses/MIT
+// https://opensource.org/licenses/Apache-2.0
+
+//! HTTP client
+
+use alloc::format;
+use alloc::string::FromUtf8Error;
+use alloc::string::String;
+use embassy_net::dns::DnsSocket;
+use alloc::vec::Vec;
+use embassy_net::dns::Error as DnsError;
+use embassy_net::tcp::client::TcpClient;
+use embassy_net::tcp::client::TcpClientState;
+use embassy_net::tcp::ConnectError as TcpConnectError;
+use embassy_net::tcp::Error as TcpError;
+use embassy_net::Stack;
+use log::debug;
+
+use reqwless::client::HttpClient;
+use reqwless::client::TlsConfig;
+use reqwless::client::TlsVerify;
+use reqwless::headers::ContentType;
+use reqwless::request::Method;
+use reqwless::request::RequestBuilder;
+use reqwless::Error as ReqlessError;
+
+use rand_core::RngCore as _;
+
+use crate::RngWrapper;
+use crate::NTFY_TOKEN;
+
+/// Response size
+const RESPONSE_SIZE: usize = 4096;
+
+/// HTTP client
+///
+/// This trait exists to be extended with requests to specific sites, like in
+/// [`WorldTimeApiClient`][crate::worldtimeapi::WorldTimeApiClient].
+pub trait ClientTrait {
+    /// Send an HTTP request
+    async fn send_request(&mut self, url: &str) -> Result<String, Error>;
+}
+
+/// HTTP client
+pub struct Client {
+    /// Wifi stack
+    stack: Stack<'static>,
+
+    /// Random numbers generator
+    rng: RngWrapper,
+
+    /// TCP client state
+    tcp_client_state: TcpClientState<1, 4096, 4096>,
+
+    /// Buffer for received TLS data
+    read_record_buffer: [u8; 16640],
+
+    /// Buffer for transmitted TLS data
+    write_record_buffer: [u8; 16640],
+}
+
+impl Client {
+    /// Create a new client
+    pub fn new(stack: Stack<'static>, rng: RngWrapper) -> Self {
+        debug!("Create TCP client state");
+        let tcp_client_state = TcpClientState::<1, 4096, 4096>::new();
+
+        Self {
+            stack,
+            rng,
+
+            tcp_client_state,
+
+            read_record_buffer: [0_u8; 16640],
+            write_record_buffer: [0_u8; 16640],
+        }
+    }
+}
+
+impl ClientTrait for Client {
+    async fn send_request(&mut self, url: &str) -> Result<String, Error> {
+        debug!("Send HTTPs request to {url}");
+
+        debug!("Create DNS socket");
+        let dns_socket = DnsSocket::new(self.stack);
+
+        let seed = self.rng.next_u64();
+        let tls_config = TlsConfig::new(
+            seed,
+            &mut self.read_record_buffer,
+            &mut self.write_record_buffer,
+            TlsVerify::None,
+        );
+
+        debug!("Create TCP client");
+        let tcp_client = TcpClient::new(self.stack, &self.tcp_client_state);
+
+        debug!("Create HTTP client");
+        let mut client = HttpClient::new_with_tls(&tcp_client, &dns_socket, tls_config);
+
+        debug!("Create HTTP request");
+        let mut buffer = [0_u8; 4096];
+        let mut request = client.request(Method::GET, url).await?;
+
+        debug!("Send HTTP request");
+        let auth = format!("Bearer {}", NTFY_TOKEN);
+        let auth_str = auth.as_str();
+        let headers = [("Authorization", auth_str)];
+        //           -H "Authorization: Bearer ''${SSH_NOTIFY_TOKEN}" \=
+        let mut response = request
+            //.host("ntfy.kittywit.ch")
+            .content_type(ContentType::TextPlain)
+            .headers(&headers);
+        let mut response = response
+            .send(&mut buffer).await?;
+
+        debug!("Response status: {:?}", response.status);
+
+        let buffer = response.body().read_to_end().await?;
+
+        debug!("Read {} bytes", buffer.len());
+
+        let mut vecy = Vec::new();
+        vecy.extend_from_slice(buffer);
+        let output = String::from_utf8(vecy)?;
+        Ok(output)
+    }
+}
+
+/// An error within an HTTP request
+#[derive(Debug)]
+pub enum Error {
+    // Error turning it into a utf-8 string
+    FromUtf8Error(FromUtf8Error),
+
+    /// Response was too large
+    ResponseTooLarge,
+
+    /// Error within TCP streams
+    Tcp(TcpError),
+
+    /// Error within TCP connection
+    TcpConnect(#[expect(unused, reason = "Never read directly")] TcpConnectError),
+
+    /// Error within DNS system
+    Dns(#[expect(unused, reason = "Never read directly")] DnsError),
+
+    /// Error in HTTP client
+    Reqless(#[expect(unused, reason = "Never read directly")] ReqlessError),
+}
+
+impl From<FromUtf8Error> for Error {
+    fn from(error: FromUtf8Error) -> Self {
+        Self::FromUtf8Error(error)
+    }
+}
+
+impl From<TcpError> for Error {
+    fn from(error: TcpError) -> Self {
+        Self::Tcp(error)
+    }
+}
+
+impl From<TcpConnectError> for Error {
+    fn from(error: TcpConnectError) -> Self {
+        Self::TcpConnect(error)
+    }
+}
+
+impl From<DnsError> for Error {
+    fn from(error: DnsError) -> Self {
+        Self::Dns(error)
+    }
+}
+
+impl From<ReqlessError> for Error {
+    fn from(error: ReqlessError) -> Self {
+        Self::Reqless(error)
+    }
+}

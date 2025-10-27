@@ -5,13 +5,20 @@
 extern crate alloc;
 
 
-use alloc::format;
+use alloc::{format, string::{String, ToString}, vec::Vec};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, once_lock::OnceLock, rwlock::RwLock};
 use esp_alloc as _;
 use esp_backtrace as _;
+use esp_hal::{peripherals::RSA, rsa::Rsa};
+
+use crate::http::ClientTrait;
 
 use {
-    embassy_net::Runner,
+    core::error::Error,
+    embassy_net::{
+        Runner,
+        
+    },
     embassy_time::{Duration, Timer},
     display_interface_spi::SPIInterface, embassy_executor::Spawner, embedded_graphics::{
         mono_font::{ascii::FONT_6X10, MonoTextStyle},
@@ -36,7 +43,14 @@ use {
     esp_println::println
 };
 
-use embassy_net::{Stack, StackResources};
+mod rng;
+mod http;
+
+use {
+    rng::RngWrapper,
+};
+
+use embassy_net::{dns::DnsSocket, tcp::client::{TcpClient, TcpClientState}, IpAddress, Stack, StackResources};
 #[cfg(target_arch = "riscv32")]
 use esp_hal::interrupt::software::SoftwareInterruptControl;
 use esp_radio::{
@@ -47,6 +61,10 @@ use esp_radio::{
 
 const SSID: &str = env!("WIFI_SSID");
 const PASSWORD: &str = env!("WIFI_PASSWORD");
+const NTFY_TOKEN: &str = env!("NTFY_TOKEN");
+const NTFY_SCHEME: &str = env!("NTFY_SCHEME");
+const NTFY_UPSTREAM: &str = env!("NTFY_UPSTREAM");
+const NTFY_SUBPATH: &str = env!("NTFY_SUBPATH");
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -320,30 +338,44 @@ struct Controller<'tft> {
 }
 
 impl <'tft>Controller<'tft> {
-    async fn init(spawner: Spawner, mut display: TFT<'tft>, stack: Stack<'static>) -> Self {
-        let wifi = ControllerWifi::init_wifi(spawner, &mut display, stack).await;
+    async fn init(mut display: TFT<'tft>, stack: Stack<'static>) -> Self {
+        let mut wifi = ControllerWifi::init_wifi(&mut display, stack).await;
         let mut controller = Self {
             display,
             wifi,
         };
         if let Some(config) = controller.wifi.stack.config_v4() {
-            controller.display.fullscreen_alert(&format!("Controller initialized!\nCurrent IP address: {}", config.address), true);
+            let dns_servers = config.dns_servers
+                .iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<String>>()
+                .join("\n");
+            controller.display.fullscreen_alert(&format!("Controller initialized!\nCurrent IP address: {}\nDNS: {}", config.address, dns_servers), true);
         }
         controller
+    }
+    async fn req(&mut self) {
+        //let url = format!("{}://{}/{}/raw", NTFY_SCHEME, NTFY_UPSTREAM, NTFY_SUBPATH);
+        let url = "https://ntfy.kittywit.ch/alerts/raw";
+        match self.wifi.client.send_request(&url).await {
+            Ok(dat) => self.display.fullscreen_alert(&dat, true),
+            Err(err) => {
+                let out = format!("Error in request: {:?}", err);
+                log::error!("{}", out);
+                self.display.fullscreen_alert(&out, true)
+            }
+        }
     }
 }
 
 struct ControllerWifi {
     stack: Stack<'static>,
+    client: http::Client,
+
 }
 
 impl ControllerWifi {
-    async fn init_wifi(spawner: Spawner, display: &mut TFT<'_>, stack: Stack<'static>) -> Self {
-
-
-        let mut rx_buffer = [0; 4096];
-        let mut tx_buffer = [0; 4096];
-
+    async fn init_wifi(display: &mut TFT<'_>, stack: Stack<'static>) -> Self {
         println!("Waiting to get IP address...");
         display.fullscreen_alert("Waiting to obtain an IP address", true);
         loop {
@@ -354,11 +386,14 @@ impl ControllerWifi {
             }
             Timer::after(Duration::from_millis(500)).await;
         }
-
+        let rng = Rng::new();
+        let client = http::Client::new(stack, RngWrapper::from(rng));
         Self {
-            stack
+            stack,
+            client,
         }
     }
+
 }
 
 #[embassy_executor::task]
@@ -420,7 +455,7 @@ async fn main(spawner: Spawner) {
     #[cfg(feature = "log")]
         // The default log level can be specified here.
         // You can see the esp-println documentation： https://docs.rs/esp-println
-    esp_println::logger::init_logger(log::LevelFilter::Info);
+    esp_println::logger::init_logger(log::LevelFilter::Debug);
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals: Peripherals = init(config);
@@ -467,7 +502,11 @@ async fn main(spawner: Spawner) {
     spawner.spawn(connection(wifi_controller)).ok();
     spawner.spawn(net_task(runner)).ok();
 
-    let controller = Controller::init(spawner, display, stack).await;
+
+    let mut controller = Controller::init(display, stack).await;
+
+    Timer::after(Duration::from_millis(5000)).await;
+    controller.req().await;
 
     loop {
         // your business logic
